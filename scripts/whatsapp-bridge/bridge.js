@@ -18,7 +18,7 @@
  *   node bridge.js --port 3000 --session ~/.hermes/whatsapp/session
  */
 
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, makeCacheableSignalKeyStore, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } from '@whiskeysockets/baileys';
 import express from 'express';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
@@ -189,7 +189,7 @@ function buildLidMap() {
 }
 let lidToPhone = buildLidMap();
 
-const logger = pino({ level: 'warn' });
+const logger = pino({ level: process.env.WA_LOG_LEVEL || 'warn' });
 
 // Message queue for polling
 const messageQueue = [];
@@ -209,12 +209,28 @@ async function startSocket() {
 
   sock = makeWASocket({
     version,
-    auth: state,
+    // Converge onto the known-good lettabot/ROG config. A raw multi-file auth
+    // state (auth: state) makes Baileys re-read signal keys from disk on every
+    // lookup, so the post-pair init-query / app-state sync burst races and
+    // stalls (AwaitingInitialSync / "init queries Timed Out") and pre-key /
+    // session handling corrupts on inbound ("Invalid PreKey ID" / "No session
+    // record"). makeCacheableSignalKeyStore batches + caches those reads the
+    // way Baileys expects — this is the documented best-practice wiring and
+    // matches the bridge that has run clean on ROG for months.
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
+    },
     logger,
     printQRInTerminal: false,
     browser: ['Hermes Agent', 'Chrome', '120.0'],
     syncFullHistory: false,
-    markOnlineOnConnect: false,
+    // markOnlineOnConnect:true + explicit keepalive/timeouts mirror the proven
+    // lettabot config (idle-disconnect mitigation added there 2026-05-22).
+    markOnlineOnConnect: true,
+    keepAliveIntervalMs: 25000,
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000,
     // Required for Baileys 7.x: without this, incoming messages that need
     // E2EE session re-establishment are silently dropped (msg.message === null)
     getMessage: async (key) => {
